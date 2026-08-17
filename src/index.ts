@@ -4,7 +4,11 @@ const fs = require("fs");
 const assert = require("assert");
 const mkdirp = require("mkdirp");
 const getDirName = require("path").dirname;
-const AWS = require("aws-sdk");
+import {
+    S3Client,
+    PutObjectCommand,
+    GetObjectCommand
+} from "@aws-sdk/client-s3";
 const path = require("path");
 const sizeOf = require("image-size");
 const Container = require("codeceptjs/lib/container");
@@ -283,60 +287,57 @@ class ResembleHelper extends Helper {
 		endpoint: Endpoint,
 	) {
 		console.log("Starting Upload... ");
-		const s3 = new AWS.S3({
-			accessKeyId: accessKeyId,
-			secretAccessKey: secretAccessKey,
-			region: region,
-			endpoint,
+
+		const s3 = new S3Client({
+			region,
+			credentials: {
+				accessKeyId,
+				secretAccessKey,
+			},
+			endpoint: endpoint?.href,
 		});
-		fs.readFile(this._getActualImagePath(baseImage), (err: any, data: any) => {
-			if (err) throw err;
-			const base64data = new Buffer(data, "binary");
-			const params = {
-				Bucket: bucketName,
-				Key: `output/${baseImage}`,
-				Body: base64data,
-			};
-			s3.upload(params, (uErr: any, uData: { Location: any }) => {
-				if (uErr) throw uErr;
-				console.log(`Screenshot Image uploaded successfully at ${uData.Location}`);
-			});
-		});
-		fs.readFile(this._getDiffImagePath(baseImage), (err: any, data: any) => {
-			if (err) console.log("Diff image not generated");
-			else {
-				const base64data = new Buffer(data, "binary");
-				const params = {
+
+		const uploadImage = async (filePath: string, key: string, successMessage: string) => {
+			const data = await fs.promises.readFile(filePath);
+
+			await s3.send(
+				new PutObjectCommand({
 					Bucket: bucketName,
-					Key: `diff/Diff_${baseImage}`,
-					Body: base64data,
-				};
-				s3.upload(params, (uErr: any, uData: { Location: any }) => {
-					if (uErr) throw uErr;
-					console.log(`Diff Image uploaded successfully at ${uData.Location}`);
-				});
-			}
-		});
+					Key: key,
+					Body: data,
+				}),
+			);
+
+			console.log(successMessage);
+		};
+
+		await uploadImage(
+			this._getActualImagePath(baseImage),
+			`output/${baseImage}`,
+			`Screenshot Image uploaded successfully`,
+		);
+
+		const diffImagePath = this._getDiffImagePath(baseImage);
+
+if (fs.existsSync(diffImagePath)) {
+    await uploadImage(
+        diffImagePath,
+        `diff/Diff_${baseImage}`,
+        `Diff Image uploaded successfully`,
+    );
+} else {
+    console.log("Diff image not generated");
+}
 
 		// If prepareBaseImage is false, then it won't upload the baseImage. However, this parameter is not considered if the config file has a prepareBaseImage set to true.
 		if (this._getPrepareBaseImage(options)) {
 			const baseImageName = this._getBaseImageName(baseImage, options);
 
-			fs.readFile(this._getBaseImagePath(baseImage, options), (err: any, data: any) => {
-				if (err) throw err;
-				else {
-					const base64data = new Buffer(data, "binary");
-					const params = {
-						Bucket: bucketName,
-						Key: `base/${baseImageName}`,
-						Body: base64data,
-					};
-					s3.upload(params, (uErr: any, uData: { Location: any }) => {
-						if (uErr) throw uErr;
-						console.log(`Base Image uploaded at ${uData.Location}`);
-					});
-				}
-			});
+			await uploadImage(
+				this._getBaseImagePath(baseImage, options),
+				`base/${baseImageName}`,
+				`Base Image uploaded`,
+			);
 		} else {
 			console.log("Not Uploading base Image");
 		}
@@ -354,7 +355,7 @@ class ResembleHelper extends Helper {
 	 * @returns {Promise<void>}
 	 */
 
-	_download(
+	async _download(
 		accessKeyId: any,
 		secretAccessKey: any,
 		region: any,
@@ -364,25 +365,41 @@ class ResembleHelper extends Helper {
 		endpoint: Endpoint,
 	) {
 		console.log("Starting Download...");
+
 		const baseImageName = this._getBaseImageName(baseImage, options);
-		const s3 = new AWS.S3({
-			accessKeyId: accessKeyId,
-			secretAccessKey: secretAccessKey,
-			region: region,
-			endpoint,
+
+		const s3 = new S3Client({
+			region,
+			credentials: {
+				accessKeyId,
+				secretAccessKey,
+			},
+			endpoint: endpoint?.href,
 		});
-		const params = {
-			Bucket: bucketName,
-			Key: `base/${baseImageName}`,
-		};
-		return new Promise((resolve) => {
-			s3.getObject(params, (err: any, data: { Body: any }) => {
-				if (err) console.error(err);
-				console.log(this._getBaseImagePath(baseImage, options));
-				fs.writeFileSync(this._getBaseImagePath(baseImage, options), data.Body);
-				resolve("File Downloaded Successfully");
-			});
-		});
+
+		try {
+			const data = await s3.send(
+				new GetObjectCommand({
+					Bucket: bucketName,
+					Key: `base/${baseImageName}`,
+				}),
+			);
+
+			if (!data.Body) {
+				throw new Error("S3 GetObject returned an empty response body");
+			}
+
+			const body = await data.Body.transformToByteArray();
+			const baseImagePath = this._getBaseImagePath(baseImage, options);
+
+			console.log(baseImagePath);
+			fs.writeFileSync(baseImagePath, Buffer.from(body));
+
+			return "File Downloaded Successfully";
+		} catch (err) {
+			console.error(err);
+			throw err;
+		}
 	}
 
 	/**
